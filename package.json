@@ -1,7 +1,7 @@
 {
   "name": "sc-fire-test",
   "version": "1.0.0",
-  "description": "WhatsApp Baileys Server",
+  "description": "WhatsApp Baileys & Execute Controller Server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
