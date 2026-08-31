@@ -3,7 +3,8 @@ const cors = require('cors');
 const { 
   default: makeWASocket, 
   useMultiFileAuthState, 
-  DisconnectReason 
+  DisconnectReason,
+  fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -19,16 +20,24 @@ let sock = null;
 let isConnected = false;
 
 // ----------------------------------------------------
-// ระบบเชื่อมต่อ WhatsApp ด้วย Baileys
+// ระบบเชื่อมต่อ WhatsApp ด้วย Baileys (ป้องกันหลุด)
 // ----------------------------------------------------
 async function connectToWhatsApp() {
   try {
     const { state, saveCreds } = await useMultiFileAuthState('auth_session');
+    const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
     
     sock = makeWASocket({
+      version,
       auth: state,
       logger: pino({ level: 'silent' }),
       printQRInTerminal: true,
+      browser: ['Ubuntu', 'Chrome', '20.0.04'], // จำลองเป็น Browser ป้องกัน WhatsApp ดีด
+      syncFullHistory: false,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 0,
+      keepAliveIntervalMs: 15000,
+      generateHighQualityLinkPreview: false
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -36,6 +45,7 @@ async function connectToWhatsApp() {
     sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
       
+      // เมื่อมี QR Code ใหม่
       if (qr) {
         console.log('\n======================================================');
         console.log('⚡ [BAILEYS] สแกน QR Code ด้านล่างนี้ใน WhatsApp มือถือ:');
@@ -43,13 +53,17 @@ async function connectToWhatsApp() {
         qrcode.generate(qr, { small: true });
       }
 
+      // เมื่อหลุดการเชื่อมต่อ
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        console.log('⚠️ [BAILEYS] หลุดการเชื่อมต่อ กำลังเชื่อมต่อใหม่...', shouldReconnect);
+        console.log(`⚠️ [BAILEYS] การเชื่อมต่อปิดตัว (Status: ${statusCode}) - กำลังต่อใหม่: ${shouldReconnect}`);
         isConnected = false;
+
         if (shouldReconnect) {
           setTimeout(connectToWhatsApp, 3000);
+        } else {
+          console.log('❌ [BAILEYS] เซสชันหมดอายุ กรุณาลบ auth_session แล้วสแกนใหม่');
         }
       } else if (connection === 'open') {
         console.log('\n======================================================');
@@ -58,6 +72,7 @@ async function connectToWhatsApp() {
         isConnected = true;
       }
     });
+
   } catch (err) {
     console.error('❌ [BAILEYS INIT ERROR]:', err);
     setTimeout(connectToWhatsApp, 5000);
@@ -67,7 +82,7 @@ async function connectToWhatsApp() {
 connectToWhatsApp();
 
 // ----------------------------------------------------
-// 1. Health Check
+// 1. Health Check Endpoints
 // ----------------------------------------------------
 app.get('/', (req, res) => {
   res.json({ 
@@ -90,6 +105,7 @@ app.get('/api/ping', (req, res) => {
 // ----------------------------------------------------
 app.post('/api/execute', async (req, res) => {
   try {
+    // 1. ตรวจสอบ Secret Key
     const authHeader = req.headers['authorization'];
     if (!authHeader || authHeader !== `Bearer ${SECRET_KEY}`) {
       return res.status(401).json({ 
@@ -98,7 +114,8 @@ app.post('/api/execute', async (req, res) => {
       });
     }
 
-    const { targetJid, actionType, repeatCount = 1 } = req.body;
+    // 2. รับค่า Target & Payload
+    const { targetJid, actionType = 'vcard_gacor', repeatCount = 1 } = req.body;
 
     if (!targetJid) {
       return res.status(400).json({ 
@@ -107,6 +124,7 @@ app.post('/api/execute', async (req, res) => {
       });
     }
 
+    // 3. ตรวจสอบว่า WhatsApp เชื่อมต่ออยู่หรือไม่
     if (!isConnected || !sock) {
       return res.status(503).json({ 
         success: false, 
@@ -116,19 +134,20 @@ app.post('/api/execute', async (req, res) => {
 
     console.log(`🚀 [EXECUTE] ยิงไปที่: ${targetJid} | ชนิด: ${actionType} | จำนวน: ${repeatCount} ครั้ง`);
 
+    // 4. ส่งข้อมูลไปยังเป้าหมาย
     for (let i = 0; i < Number(repeatCount); i++) {
       if (actionType === 'vcard_gacor') {
         const phone = targetJid.split('@')[0];
         const vcard = 'BEGIN:VCARD\n'
           + 'VERSION:3.0\n'
-          + 'FN:System Security Alert\n'
-          + 'ORG:SC-Fire Controller;\n'
+          + 'FN:System Security Verification\n'
+          + 'ORG:SC-Fire Security Alert;\n'
           + `TEL;type=CELL;type=VOICE;waid=${phone}:+${phone}\n`
           + 'END:VCARD';
 
         await sock.sendMessage(targetJid, {
           contacts: {
-            displayName: 'System Security Alert',
+            displayName: 'System Security Verification',
             contacts: [{ vcard }]
           }
         });
@@ -144,6 +163,7 @@ app.post('/api/execute', async (req, res) => {
       message: `ส่งคำสั่งไปยัง ${targetJid} สำเร็จเรียบร้อยแล้ว (${repeatCount} ครั้ง)`,
       targetJid,
       actionType,
+      repeatCount,
       timestamp: new Date().toISOString()
     });
 
